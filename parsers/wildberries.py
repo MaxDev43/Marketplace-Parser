@@ -11,8 +11,12 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+# Отключение деструктора, чтобы он не дёргал quit() повторно и не выдавал ошибкой при выходе.
+uc.Chrome.__del__ = lambda self: None
+
 # ====================== ГЛОБАЛЬНЫЕ НАСТРОЙКИ ======================
-TARGET_PRODUCT_COUNT = 30            # Сколько товаров нужно спарсить
+# Запасное значение, используется ТОЛЬКО при прямом запуске без run.py
+DEFAULT_PRODUCT_COUNT = 30
 
 # === Настройки борьбы с AntiBot ===
 MAX_ANTIBOT_ATTEMPTS = 3            # Максимальное количество попыток на один товар
@@ -26,7 +30,7 @@ OUTPUT_DIR = BASE_DIR / "output"
 LOG_FILE = LOG_DIR / "wildberries_parser.log"
 
 ANTIBOT_MARKERS = [
-    "сопоставьте пазл", "двигая ползунок", "robot", "captcha",
+    "сопоставьте пазл", "двигая ползунок", "captcha",
     "verify you are human", "подтвердите, что вы не робот",
     "пройти проверку", "я не робот", "cloudflare", "access denied"
 ]
@@ -94,10 +98,6 @@ def get_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-    ) 
 
     driver = uc.Chrome(
         options=options,
@@ -123,7 +123,7 @@ def wait_for_user_region_selection():
     
     input("Нажмите ENTER для продолжения парсинга... ")
     print("✅ Регион выбран. Продолжаем работу...\n")
-    time.sleep(2)  # небольшая пауза после продолжения
+    time.sleep(1)  # небольшая пауза после продолжения
 
 def normalize_url(url: str) -> str:
     """Приводит относительные ссылки к полному виду"""
@@ -360,11 +360,16 @@ def extract_description(driver) -> str:
 
 
 def extract_characteristics(driver) -> dict[str, str]:
+    """Извлекает характеристики товара."""
     logger.debug("Извлечение характеристик...")
     chars = {}
 
     tables = driver.find_elements(By.XPATH,
         "//table[contains(@class, 'table--UAo6u') or contains(@class, 'articleTable') or contains(@class, 'characteristics')]")
+
+    if not tables:
+        logger.debug("Таблицы по известным классам не найдены — пробуем любые <table> на странице")
+        tables = driver.find_elements(By.XPATH, "//table")
 
     for table in tables:
         try:
@@ -463,9 +468,16 @@ def parse_product_page(driver, url: str, product_index: int, total: int) -> dict
 
 # ====================== MAIN ======================
 
-def main(url: str = None, output: str = None):
+def main(url: str = None, output: str = None, num: int = None):
+    """Основная функция программы.
+
+    `num` приходит из run.py. Если main() вызвана напрямую (`python parsers/wildberries.py`)
+    без `num` — используется запасное значение DEFAULT_PRODUCT_COUNT.
+    """
+    target_count = num or DEFAULT_PRODUCT_COUNT
+
     logger.info("=== ЗАПУСК ПАРСЕРА WILDBERRIES ===")
-    logger.info("Целевое количество товаров: %d", TARGET_PRODUCT_COUNT)
+    logger.info("Целевое количество товаров: %d", target_count)
 
     if not url:
         url = input("🔗 Вставьте ссылку на страницу поиска Wildberries: ").strip()
@@ -487,10 +499,10 @@ def main(url: str = None, output: str = None):
 
         WebDriverWait(driver, 6).until(lambda d: len(d.find_elements(By.XPATH, "//a[contains(@class, 'product-card__link')]")) > 0)
 
-        links = collect_product_links(driver, max_items=TARGET_PRODUCT_COUNT)
+        links = collect_product_links(driver, max_items=target_count)
         print(f"Найдено товаров: {len(links)}\n")
 
-        to_process = min(TARGET_PRODUCT_COUNT, len(links))
+        to_process = min(target_count, len(links))
 
         for i, link in enumerate(links[:to_process], start=1):
             print(f"Товар {i}/{to_process}")
@@ -539,7 +551,6 @@ def main(url: str = None, output: str = None):
 
         print(f"\nГотово ✅! Собрано товаров: {len(products)}")
         print(f"Файл сохранён: {output_path}\n")
-        print("Если в конце появилась ошибка — игнорируйте её, она harmless.")
 
 
 if __name__ == "__main__":

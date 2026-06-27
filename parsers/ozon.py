@@ -11,8 +11,12 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+# Отключение деструктора, чтобы он не дёргал quit() повторно и не выдавал ошибкой при выходе.
+uc.Chrome.__del__ = lambda self: None
+
 # ====================== ГЛОБАЛЬНЫЕ НАСТРОЙКИ ======================
-TARGET_PRODUCT_COUNT = 30                    # Сколько товаров нужно спарсить
+# Запасное значение, используется ТОЛЬКО при прямом запуске без run.py
+DEFAULT_PRODUCT_COUNT = 30
 
 # === Настройки борьбы с AntiBot ===
 MAX_ANTIBOT_ATTEMPTS = 3                    # Максимальное количество попыток на один товар
@@ -26,10 +30,10 @@ LOG_DIR = BASE_DIR / "logs"
 OUTPUT_DIR = BASE_DIR / "output"
 LOG_FILE = LOG_DIR / "ozon_parser.log"
 
-# Маркеры AntiBot-страницы
 ANTIBOT_MARKERS = [
-    "сопоставьте пазл", "двигая ползунок", "robot", "captcha",
+    "сопоставьте пазл", "двигая ползунок", "captcha",
     "verify you are human", "подтвердите, что вы не робот",
+    "я не робот", "access denied", "checking your browser",
 ]
 
 # Маркеры окончания разделов
@@ -114,10 +118,6 @@ def get_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-    ) 
 
     driver = uc.Chrome(
         options=options,
@@ -350,56 +350,58 @@ def extract_description(driver) -> str:
 
 
 def extract_characteristics(driver) -> dict[str, str]:
-    """Извлекает все характеристики товара (основной + резервные методы)."""
+    """Извлекает все характеристики товара."""
     logger.debug("Начинаем извлечение характеристик...")
     characteristics: dict[str, str] = {}
 
-    # 1. Основной парсер
+    # 1. Основной способ: блок характеристик лежит в #section-characteristics,
+    #    внутри — пары <dt>/<dd> внутри <dl>. Хэш-классы дочерних элементов игнорируем.
     try:
-        dl_items = driver.find_elements(By.XPATH, "//dl[contains(@class, 'pdp_a9i')]")
+        section = driver.find_element(By.XPATH, "//*[@id='section-characteristics']")
+        dl_items = section.find_elements(By.XPATH, ".//dl")
         for dl in dl_items:
             try:
                 dt = dl.find_element(By.XPATH, ".//dt")
-                key_text = clean_text(dt.text).replace(":", "").strip()
-                key = key_text
-
-                # Пропускаем широкий блок "Предназначено для", чтобы избежать дублирования
-                if "pdp_ai9" in dl.get_attribute("class") and "Предназначено для" in key:
-                    continue
-
-                dd = dl.find_element(By.XPATH, ".//dd[contains(@class, 'pdp_ia8')]")
+                dd = dl.find_element(By.XPATH, ".//dd")
+                key = clean_text(dt.text).rstrip(":").strip()
                 value = clean_text(dd.text)
-
                 if looks_like_key(key) and value and "Информация о технических характеристиках" not in value:
                     characteristics[key] = value
             except Exception:
                 continue
-        logger.debug("Найдено через pdp_a9i: %d характеристик", len(characteristics))
+        logger.debug("Найдено через #section-characteristics: %d характеристик", len(characteristics))
     except Exception as e:
-        logger.debug("Новый pdp-парсер не сработал: %s", e)
+        logger.debug("Блок #section-characteristics не найден на странице: %s", e)
 
-    # 2. Старый парсер (резерв)
-    try:
-        items = driver.find_elements(By.XPATH,
-            "//div[contains(@data-testid, 'specification') or contains(@class, 'specification__item') or contains(@class, 'char-item')] | "
-            "//div[contains(@class, '_name') and following-sibling::div[contains(@class, '_value')]]"
+    # 2. Резерв: если блока с таким id нет (другой шаблон карточки) —
+    #    ищем любые <dl> с парой <dt>/<dd> по всей странице.
+    if not characteristics:
+        try:
+            dl_items = driver.find_elements(By.XPATH, "//dl[.//dt and .//dd]")
+            for dl in dl_items:
+                try:
+                    dt = dl.find_element(By.XPATH, ".//dt")
+                    dd = dl.find_element(By.XPATH, ".//dd")
+                    key = clean_text(dt.text).rstrip(":").strip()
+                    value = clean_text(dd.text)
+                    if looks_like_key(key) and value and "Информация о технических характеристиках" not in value:
+                        characteristics[key] = value
+                except Exception:
+                    continue
+            logger.debug("Найдено через общий dl/dt/dd-резерв: %d характеристик", len(characteristics))
+        except Exception as e:
+            logger.debug("dl/dt/dd-резерв не сработал: %s", e)
+
+    # 3. Текстовый fallback — на случай, если верстка страницы совсем не похожа на привычную
+    if not characteristics:
+        body_text = get_body_text(driver)
+        section_text = extract_section_text(
+            body_text, "Характеристики",
+            ["Отзывы о товаре", "Подобрали для вас", "Покупают вместе", "Рекомендуем также"],
         )
-        for item in items:
-            texts = [clean_text(t.text) for t in item.find_elements(By.XPATH, ".//div | .//span | .//p")]
-            if len(texts) >= 2:
-                key, value = texts[0].strip(), " ".join(texts[1:]).strip()
-                if looks_like_key(key) and value and "Информация о технических характеристиках" not in value:
-                    characteristics[key] = value
-    except Exception:
-        pass
-
-    # 3. Fallback - парсинг текста всей страницы
-    body_text = get_body_text(driver)
-    section = extract_section_text(body_text, "Характеристики", ["Отзывы о товаре", "Подобрали для вас", "Покупают вместе", "Рекомендуем также"])
-    if section:
-        lines = [clean_text(line) for line in section.splitlines() if line and line not in NOISE_LINES]
-        text_chars = parse_key_value_lines(lines)
-        characteristics.update(text_chars)
+        if section_text:
+            lines = [clean_text(line) for line in section_text.splitlines() if line and line not in NOISE_LINES]
+            characteristics.update(parse_key_value_lines(lines))
 
     # Финальная очистка
     cleaned = {}
@@ -528,10 +530,16 @@ def parse_product_page(driver, url: str, product_index: int, total: int) -> dict
 
 
 # ====================== MAIN ======================
-def main(url: str = None, output: str = None):
-    """Основная функция программы (можно вызывать из run.py)."""
+def main(url: str = None, output: str = None, num: int = None):
+    """Основная функция программы.
+
+    `num` приходит из run.py. Если main() вызвана напрямую (`python parsers/ozon.py`) без
+    `num` — используется запасное значение DEFAULT_PRODUCT_COUNT.
+    """
+    target_count = num or DEFAULT_PRODUCT_COUNT
+
     logger.info("=== ЗАПУСК ПАРСЕРА OZON ===")
-    logger.info("Целевое количество товаров: %d", TARGET_PRODUCT_COUNT)
+    logger.info("Целевое количество товаров: %d", target_count)
 
     if not url:
         url = input("🔗 Вставьте ссылку на страницу поиска Ozon: ").strip()
@@ -550,10 +558,10 @@ def main(url: str = None, output: str = None):
         time.sleep(4)
         WebDriverWait(driver, 8).until(lambda d: len(d.find_elements(By.XPATH, "//a[@href]")) > 0)
 
-        links = collect_product_links(driver, max_items=TARGET_PRODUCT_COUNT)
+        links = collect_product_links(driver, max_items=target_count)
         print(f"Найдено товаров: {len(links)}\n")
 
-        to_process = min(TARGET_PRODUCT_COUNT, len(links))
+        to_process = min(target_count, len(links))
 
         for i, link in enumerate(links[:to_process], start=1):
             print(f"Товар {i}/{to_process}")
@@ -605,7 +613,6 @@ def main(url: str = None, output: str = None):
 
         print(f"\nГотово ✅! Собрано товаров: {len(products)}")
         print(f"Файл сохранён: {output_path}\n")
-        print("Если появилась ошибка ниже - игнорируйте её, она harmless:")
         logger.info("=== ПАРСЕР OZON ЗАВЕРШИЛ РАБОТУ УСПЕШНО ===")
 
 
