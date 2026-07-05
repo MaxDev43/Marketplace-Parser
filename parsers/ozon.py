@@ -4,6 +4,9 @@ import random
 import re
 import time
 from pathlib import Path
+import tomllib
+import subprocess
+import sys
 
 import undetected_chromedriver as uc
 from selenium.common.exceptions import TimeoutException
@@ -11,39 +14,34 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-# Отключение деструктора, чтобы он не дёргал quit() повторно и не выдавал ошибкой при выходе.
+# Предотвращает WinError 6 из-за повторного quit() в GC-деструкторе undetected-chromedriver
 uc.Chrome.__del__ = lambda self: None
 
-# ====================== ГЛОБАЛЬНЫЕ НАСТРОЙКИ ======================
-# Запасное значение, используется ТОЛЬКО при прямом запуске без run.py
-DEFAULT_PRODUCT_COUNT = 30
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent
 
-# === Настройки борьбы с AntiBot ===
-MAX_ANTIBOT_ATTEMPTS = 3                    # Максимальное количество попыток на один товар
-ANTIBOT_WAIT_BEFORE_RETRY = 5.0             # секунд ожидания перед повторной попыткой (без refresh)
-ANTIBOT_WAIT_AFTER_REFRESH = 4.0            # секунд ожидания после refresh страницы
-
-
-# Пути
-BASE_DIR = Path(__file__).resolve().parent.parent
 LOG_DIR = BASE_DIR / "logs"
 OUTPUT_DIR = BASE_DIR / "output"
 LOG_FILE = LOG_DIR / "ozon_parser.log"
 
-ANTIBOT_MARKERS = [
-    "сопоставьте пазл", "двигая ползунок", "captcha",
-    "verify you are human", "подтвердите, что вы не робот",
-    "я не робот", "access denied", "checking your browser",
-]
+with open(BASE_DIR / "config.toml", "rb") as f:
+    _config = tomllib.load(f)
 
-# Маркеры окончания разделов
+DEFAULT_PRODUCT_COUNT = _config["common"]["DEFAULT_PRODUCT_COUNT"]
+SWITCH_TO_CHEAPER_OFFER = _config["ozon"]["SWITCH_TO_CHEAPER_OFFER"]
+MAX_ANTIBOT_ATTEMPTS = _config["ozon"]["MAX_ANTIBOT_ATTEMPTS"]
+ANTIBOT_WAIT_BEFORE_RETRY = _config["ozon"]["ANTIBOT_WAIT_BEFORE_RETRY"]
+ANTIBOT_WAIT_AFTER_REFRESH = _config["ozon"]["ANTIBOT_WAIT_AFTER_REFRESH"]
+ANTIBOT_MARKERS = _config["ozon"]["ANTIBOT_MARKERS"]
+
 SECTION_END_MARKERS = [
     "Характеристики", "Описание", "Отзывы о товаре", "Подобрали для вас",
     "Покупают вместе", "Рекомендуем также", "Похожие", "Наведите камеру",
     "О магазине", "Доставка и возврат",
 ]
 
-# Строки, которые нужно игнорировать при парсинге
 NOISE_LINES = {
     "Характеристики", "Описание", "Комплектация", "Подобрали для вас",
     "Покупают вместе", "Рекомендуем также", "Похожие", "Отзывы о товаре",
@@ -51,6 +49,7 @@ NOISE_LINES = {
     "О магазине", "Доставка и возврат",
     "Информация о технических характеристиках, комплекте поставки, стране изготовления, внешнем виде и цвете товара носит справочный характер и основывается на последних доступных к моменту публикации сведениях",
 }
+
 
 def setup_logger() -> logging.Logger:
     """Настраивает и возвращает логгер для Ozon."""
@@ -80,33 +79,44 @@ def setup_logger() -> logging.Logger:
 
 logger = setup_logger()
 
-
 def get_chrome_major_version() -> int | None:
-    """Автоматически определяет major-версию установленного Chrome из реестра Windows.
-    Если не получится — возвращает None (undetected_chromedriver будет определять сам)."""
-    try:
-        import winreg
-        # Путь для пользовательской установки Chrome
-        key_path = r"SOFTWARE\Google\Chrome\BLBeacon"
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
-        version, _ = winreg.QueryValueEx(key, "version")
-        winreg.CloseKey(key)
-        
-        major = int(version.split(".")[0])
-        logger.info("✅ Обнаружена версия Chrome: %s (major %d)", version, major)
-        return major
-    except Exception as e:
-        logger.warning("Не удалось определить версию Chrome через реестр (%s). "
-                       "Будет использован авто-режим undetected_chromedriver", e)
-        return None
+    """Определяет установленную major-версию Chrome на момент запуска."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Google\Chrome\BLBeacon")
+            version, _ = winreg.QueryValueEx(key, "version")
+            winreg.CloseKey(key)
+            major = int(version.split(".")[0])
+            logger.info("✅ Обнаружена версия Chrome: %s (major %d)", version, major)
+            return major
+        except Exception as e:
+            logger.warning("Не удалось определить версию Chrome через реестр (%s)", e)
+            return None
+
+    if sys.platform == "darwin":
+        binaries = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    else:
+        binaries = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
+
+    for binary in binaries:
+        try:
+            result = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=5)
+            match = re.search(r"(\d+)\.", result.stdout)
+            if match:
+                major = int(match.group(1))
+                logger.info("✅ Обнаружена версия Chrome (%s): major %d", binary, major)
+                return major
+        except Exception:
+            continue
+
+    logger.warning("Не удалось определить версию Chrome автоматически")
+    return None
 
 def get_driver():
     """Создаёт и возвращает undetected Chrome driver."""
     logger.info("Создаём undetected_chromedriver...")
-    
-    # получаем актуальную версию Chrome ===
     chrome_major = get_chrome_major_version()
-    
     options = uc.ChromeOptions()
     options.page_load_strategy = "eager"
     # options.add_argument("--headless=new")         # раскомментировать при необходимости
@@ -124,11 +134,12 @@ def get_driver():
         use_subprocess=True,
         version_main=chrome_major,
     )
-    
+
     driver.set_page_load_timeout(15)
-    logger.info("Браузер успешно создан (Chrome %s)", 
+    logger.info("Браузер успешно создан (Chrome %s)",
                 chrome_major if chrome_major else "auto")
     return driver
+
 
 # ====================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ======================
 def normalize_url(url: str) -> str:
@@ -277,7 +288,6 @@ def extract_price(driver) -> str:
     """Извлекает цену товара (meta-теги → XPath)."""
     logger.debug("Начинаем извлечение цены...")
 
-    # Meta-теги
     meta_selectors = [
         'meta[itemprop="price"]',
         'meta[property="product:price:amount"]',
@@ -294,7 +304,6 @@ def extract_price(driver) -> str:
         except Exception:
             pass
 
-    # Fallback через видимый текст
     xpaths = [
         "//*[contains(@data-testid, 'price')]",
         "//span[contains(@class, 'price')]",
@@ -331,7 +340,6 @@ def extract_description(driver) -> str:
     if len(desc) > 80:
         return desc
 
-    # Fallback-селекторы
     selectors = [
         "//div[@data-testid='pdp-description']",
         "//div[contains(@class, 'pdp-description')]",
@@ -350,12 +358,10 @@ def extract_description(driver) -> str:
 
 
 def extract_characteristics(driver) -> dict[str, str]:
-    """Извлекает все характеристики товара."""
+    """Извлекает характеристики товара"""
     logger.debug("Начинаем извлечение характеристик...")
     characteristics: dict[str, str] = {}
 
-    # 1. Основной способ: блок характеристик лежит в #section-characteristics,
-    #    внутри — пары <dt>/<dd> внутри <dl>. Хэш-классы дочерних элементов игнорируем.
     try:
         section = driver.find_element(By.XPATH, "//*[@id='section-characteristics']")
         dl_items = section.find_elements(By.XPATH, ".//dl")
@@ -373,8 +379,6 @@ def extract_characteristics(driver) -> dict[str, str]:
     except Exception as e:
         logger.debug("Блок #section-characteristics не найден на странице: %s", e)
 
-    # 2. Резерв: если блока с таким id нет (другой шаблон карточки) —
-    #    ищем любые <dl> с парой <dt>/<dd> по всей странице.
     if not characteristics:
         try:
             dl_items = driver.find_elements(By.XPATH, "//dl[.//dt and .//dd]")
@@ -392,7 +396,6 @@ def extract_characteristics(driver) -> dict[str, str]:
         except Exception as e:
             logger.debug("dl/dt/dd-резерв не сработал: %s", e)
 
-    # 3. Текстовый fallback — на случай, если верстка страницы совсем не похожа на привычную
     if not characteristics:
         body_text = get_body_text(driver)
         section_text = extract_section_text(
@@ -403,7 +406,6 @@ def extract_characteristics(driver) -> dict[str, str]:
             lines = [clean_text(line) for line in section_text.splitlines() if line and line not in NOISE_LINES]
             characteristics.update(parse_key_value_lines(lines))
 
-    # Финальная очистка
     cleaned = {}
     disclaimer = "Информация о технических характеристиках, комплекте поставки"
     for k, v in characteristics.items():
@@ -464,6 +466,84 @@ def safe_text(driver, by, selector, default="Не найдено") -> str:
     return default
 
 
+def _find_offer_rows(driver):
+    """Строки предложений в модалке сравнения продавцов (id="seller-list")."""
+    for xpath in (
+        "//*[@id='seller-list']/*/*[.//button]",
+        "//*[@id='seller-list']/*[.//button]",
+    ):
+        rows = driver.find_elements(By.XPATH, xpath)
+        if rows:
+            return rows
+    return []
+
+
+def find_cheaper_offer_and_switch(driver) -> str | None:
+    """Обнаруживает виджет "Есть дешевле" / "Есть дешевле или быстрее" и, если SWITCH_TO_CHEAPER_OFFER=True, 
+    переходит на самое дешёвое предложение, возвращает новый URL при переходе, иначе None.
+    """
+    try:
+        widgets = driver.find_elements(
+            By.XPATH,
+            "//span[normalize-space(text())='Есть дешевле' "
+            "or normalize-space(text())='Есть дешевле или быстрее']",
+        )
+        if not widgets:
+            return None
+
+        widget = widgets[0]
+        widget_label = clean_text(widget.text)
+
+        price_hint = ""
+        try:
+            hint_el = widget.find_element(By.XPATH, "following-sibling::span[1]")
+            price_hint = clean_text(hint_el.text)
+        except Exception:
+            pass
+
+        msg = f"Обнаружено предложение «{widget_label}»" + (f" ({price_hint})" if price_hint else "")
+        logger.info("[дешевле] %s", msg)
+        print(f"   💡 {msg}")
+
+        if not SWITCH_TO_CHEAPER_OFFER:
+            return None
+
+        driver.execute_script("arguments[0].click();", widget)
+        time.sleep(1.0)
+
+        try:
+            WebDriverWait(driver, 6).until(
+                EC.presence_of_element_located((By.XPATH, "//*[@data-widget='modalLayout']"))
+            )
+        except TimeoutException:
+            logger.warning("[дешевле] Модалка с предложениями не появилась")
+            return None
+
+        rows = _find_offer_rows(driver)
+        if not rows:
+            logger.warning("[дешевле] Список предложений в модалке пуст")
+            return None
+
+        top_row = rows[0]
+        url_before = driver.current_url
+
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", top_row)
+        time.sleep(0.3)
+        driver.execute_script("arguments[0].click();", top_row)
+        time.sleep(1.5)
+
+        url_after = driver.current_url
+        if url_after != url_before:
+            logger.info("[дешевле] Переход на: %s", url_after)
+            return url_after
+
+        return None
+
+    except Exception as e:
+        logger.warning("[дешевле] Ошибка: %s", e)
+        return None
+
+
 # ====================== ПАРСИНГ ОДНОЙ КАРТОЧКИ ======================
 def parse_product_page(driver, url: str, product_index: int, total: int) -> dict[str, object] | None:
     """Парсит одну страницу товара."""
@@ -486,7 +566,7 @@ def parse_product_page(driver, url: str, product_index: int, total: int) -> dict
         except TimeoutException:
             pass
 
-        expand_all_hidden_content(driver)          # важно для раскрытия характеристик
+        expand_all_hidden_content(driver)
 
         title_text = safe_text(driver, By.TAG_NAME, "h1")
 
@@ -513,6 +593,14 @@ def parse_product_page(driver, url: str, product_index: int, total: int) -> dict
         print(f"Товар {product_index}/{total} → AntiBot, отложен на повторную проверку")
         return None
 
+    final_url = url
+    switched_url = find_cheaper_offer_and_switch(driver)
+    if switched_url:
+        final_url = switched_url
+        print(f"Товар {product_index}/{total} → найдено дешевле, переключились на другое предложение")
+        title_text = safe_text(driver, By.TAG_NAME, "h1")
+        expand_all_hidden_content(driver)
+
     name = title_text if title_text and title_text != "Не найдено" else clean_text(driver.title) or "Не найдено"
     price = extract_price(driver)
     description = extract_description(driver)
@@ -521,7 +609,7 @@ def parse_product_page(driver, url: str, product_index: int, total: int) -> dict
     logger.info("=== ТОВАР %d УСПЕШНО СПАРСЕН ===", product_index)
 
     return {
-        "link": url,
+        "link": final_url,
         "name": name,
         "price": price,
         "description": description,
@@ -531,11 +619,7 @@ def parse_product_page(driver, url: str, product_index: int, total: int) -> dict
 
 # ====================== MAIN ======================
 def main(url: str = None, output: str = None, num: int = None):
-    """Основная функция программы.
-
-    `num` приходит из run.py. Если main() вызвана напрямую (`python parsers/ozon.py`) без
-    `num` — используется запасное значение DEFAULT_PRODUCT_COUNT.
-    """
+    """num не передан → берётся DEFAULT_PRODUCT_COUNT из config.toml."""
     target_count = num or DEFAULT_PRODUCT_COUNT
 
     logger.info("=== ЗАПУСК ПАРСЕРА OZON ===")
@@ -544,7 +628,6 @@ def main(url: str = None, output: str = None, num: int = None):
     if not url:
         url = input("🔗 Вставьте ссылку на страницу поиска Ozon: ").strip()
 
-    # Создаём папки, если их нет
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     driver = None
@@ -604,7 +687,6 @@ def main(url: str = None, output: str = None, num: int = None):
             except:
                 pass
 
-        # Сохраняем результат в папку output/
         output_filename = output or "ozon_products.json"
         output_path = OUTPUT_DIR / output_filename
 
@@ -617,4 +699,7 @@ def main(url: str = None, output: str = None, num: int = None):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        input("\nНажмите Enter для выхода...")

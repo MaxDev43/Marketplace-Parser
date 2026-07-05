@@ -4,6 +4,9 @@ import random
 import re
 import time
 from pathlib import Path
+import tomllib
+import subprocess
+import sys
 
 import undetected_chromedriver as uc
 from selenium.common.exceptions import TimeoutException
@@ -11,29 +14,27 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-# Отключение деструктора, чтобы он не дёргал quit() повторно и не выдавал ошибкой при выходе.
+# Предотвращает WinError 6 из-за повторного quit() в GC-деструкторе undetected-chromedriver
 uc.Chrome.__del__ = lambda self: None
 
-# ====================== ГЛОБАЛЬНЫЕ НАСТРОЙКИ ======================
-# Запасное значение, используется ТОЛЬКО при прямом запуске без run.py
-DEFAULT_PRODUCT_COUNT = 30
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent
 
-# === Настройки борьбы с AntiBot ===
-MAX_ANTIBOT_ATTEMPTS = 3            # Максимальное количество попыток на один товар
-ANTIBOT_WAIT_BEFORE_RETRY = 5.0     # секунд ожидания перед повторной попыткой (без refresh)
-ANTIBOT_WAIT_AFTER_REFRESH = 4.0    # секунд ожидания после refresh страницы
-
-# Пути
-BASE_DIR = Path(__file__).resolve().parent.parent
 LOG_DIR = BASE_DIR / "logs"
 OUTPUT_DIR = BASE_DIR / "output"
 LOG_FILE = LOG_DIR / "wildberries_parser.log"
 
-ANTIBOT_MARKERS = [
-    "сопоставьте пазл", "двигая ползунок", "captcha",
-    "verify you are human", "подтвердите, что вы не робот",
-    "пройти проверку", "я не робот", "cloudflare", "access denied"
-]
+with open(BASE_DIR / "config.toml", "rb") as f:
+    _config = tomllib.load(f)
+
+DEFAULT_PRODUCT_COUNT = _config["common"]["DEFAULT_PRODUCT_COUNT"]
+WAIT_FOR_REGION_SELECTION = _config["wildberries"]["WAIT_FOR_REGION_SELECTION"]
+MAX_ANTIBOT_ATTEMPTS = _config["wildberries"]["MAX_ANTIBOT_ATTEMPTS"]
+ANTIBOT_WAIT_BEFORE_RETRY = _config["wildberries"]["ANTIBOT_WAIT_BEFORE_RETRY"]
+ANTIBOT_WAIT_AFTER_REFRESH = _config["wildberries"]["ANTIBOT_WAIT_AFTER_REFRESH"]
+ANTIBOT_MARKERS = _config["wildberries"]["ANTIBOT_MARKERS"]
 
 
 def setup_logger() -> logging.Logger:
@@ -62,31 +63,50 @@ def setup_logger() -> logging.Logger:
 logger = setup_logger()
 
 def get_chrome_major_version() -> int | None:
-    """Автоматически определяет major-версию установленного Chrome из реестра Windows.
-    Если не получится — возвращает None (undetected_chromedriver будет определять сам)."""
-    try:
-        import winreg
-        # Путь для пользовательской установки Chrome
-        key_path = r"SOFTWARE\Google\Chrome\BLBeacon"
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
-        version, _ = winreg.QueryValueEx(key, "version")
-        winreg.CloseKey(key)
-        
-        major = int(version.split(".")[0])
-        logger.info("✅ Обнаружена версия Chrome: %s (major %d)", version, major)
-        return major
-    except Exception as e:
-        logger.warning("Не удалось определить версию Chrome через реестр (%s). "
-                       "Будет использован авто-режим undetected_chromedriver", e)
-        return None
+    """Определяет установленную major-версию Chrome на момент запуска.
+
+    Передаётся в version_main, чтобы undetected_chromedriver скачивал
+    chromedriver строго под неё, а не под "последнюю доступную" — иначе
+    из-за известного расхождения в uc (issue #2158) можно получить
+    driver новее реально установленного Chrome после его автообновления.
+    Определяется заново при каждом запуске, поэтому не протухает.
+    """
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Google\Chrome\BLBeacon")
+            version, _ = winreg.QueryValueEx(key, "version")
+            winreg.CloseKey(key)
+            major = int(version.split(".")[0])
+            logger.info("✅ Обнаружена версия Chrome: %s (major %d)", version, major)
+            return major
+        except Exception as e:
+            logger.warning("Не удалось определить версию Chrome через реестр (%s)", e)
+            return None
+
+    if sys.platform == "darwin":
+        binaries = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    else:
+        binaries = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
+
+    for binary in binaries:
+        try:
+            result = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=5)
+            match = re.search(r"(\d+)\.", result.stdout)
+            if match:
+                major = int(match.group(1))
+                logger.info("✅ Обнаружена версия Chrome (%s): major %d", binary, major)
+                return major
+        except Exception:
+            continue
+
+    logger.warning("Не удалось определить версию Chrome автоматически")
+    return None
 
 def get_driver():
     """Создаёт и возвращает undetected Chrome driver."""
     logger.info("Создаём undetected_chromedriver...")
-    
-    # получаем актуальную версию Chrome
     chrome_major = get_chrome_major_version()
-    
     options = uc.ChromeOptions()
     options.page_load_strategy = "eager"
     # options.add_argument("--headless=new")         # раскомментировать при необходимости
@@ -104,26 +124,28 @@ def get_driver():
         use_subprocess=True,
         version_main=chrome_major,
     )
-    
+
     driver.set_page_load_timeout(12)
-    logger.info("Браузер успешно создан (Chrome %s)", 
+    logger.info("Браузер успешно создан (Chrome %s)",
                 chrome_major if chrome_major else "auto")
     return driver
+
 
 # ====================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ======================
 
 def wait_for_user_region_selection():
-    """Останавливает выполнение и ждёт, пока пользователь вручную выберет регион на Ozon."""
+    """Останавливает выполнение и ждёт, пока пользователь вручную выберет регион."""
     print("\n" + "="*70)
     print("ОЖИДАНИЕ ВЫБОРА РЕГИОНА")
     print("1. В открывшемся браузере выберите нужный регион (город), для точности цены.")
     print("2. Дождитесь, пока страница полностью обновится после выбора региона")
     print("3. Когда всё готово — нажмите клавишу **ENTER** в этом окне консоли.")
     print("="*70)
-    
+
     input("Нажмите ENTER для продолжения парсинга... ")
     print("✅ Регион выбран. Продолжаем работу...\n")
-    time.sleep(1)  # небольшая пауза после продолжения
+    time.sleep(2)
+
 
 def normalize_url(url: str) -> str:
     """Приводит относительные ссылки к полному виду"""
@@ -174,7 +196,6 @@ def collect_product_links(driver, max_items: int) -> list[str]:
     for step in range(scroll_rounds):
         new_links = 0
 
-        # XPATH
         xpath = (
             "//a[contains(@class, 'product-card__link') "
             "and contains(@href, '/detail.aspx') "
@@ -199,7 +220,6 @@ def collect_product_links(driver, max_items: int) -> list[str]:
             logger.info("Достигнут лимит %d товаров, прерываем сбор", max_items)
             break
 
-        # Прокрутка
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(random.uniform(0.3, 0.7))
 
@@ -221,8 +241,8 @@ def safe_text(driver, by, selector, default="Не найдено") -> str:
 # ====================== ОТКРЫТИЕ ПАНЕЛИ ======================
 
 def open_product_details_panel(driver):
-    """Агрессивное открытие панели характеристик"""
-    logger.debug("=== АГРЕССИВНОЕ ОТКРЫТИЕ ПАНЕЛИ ХАРАКТЕРИСТИК ===")
+    """Открывает панель характеристик и описания."""
+    logger.debug("=== ОТКРЫТИЕ ПАНЕЛИ ХАРАКТЕРИСТИК ===")
 
     button_patterns = [
         "//button[contains(., 'Характеристики и описание')]",
@@ -302,7 +322,7 @@ def extract_price(driver) -> str:
 
 
 def extract_name(driver) -> str:
-    """УНИВЕРСАЛЬНОЕ извлечение названия — работает и в полноэкранном, и в полуэкранном режиме"""
+    """Извлечение названия (бренд + заголовок) — работает и в полноэкранном, и в полуэкранном режиме"""
     logger.debug("Извлечение названия (brand + title)")
 
     # 1. Бренд
@@ -312,11 +332,11 @@ def extract_name(driver) -> str:
         "//div[contains(@class, 'brand')]//span | "
         "//span[contains(@class, 'brand-name')] | "
         "//div[contains(@class, 'productHeader__brand')]//span",
-        default="")   # ← важно: default=""
+        default="")
 
     # 2. Название
     title_selectors = [
-        "//h1",                                           # самый главный в adaptive-режиме
+        "//h1",
         "//h2[contains(@class, 'productTitle')]",
         "//h2[contains(@class, 'mo-typography_variant_title3')]",
         "//h2[contains(@class, 'mo-typography_variant_title2')]",
@@ -327,7 +347,7 @@ def extract_name(driver) -> str:
     title = ""
     for sel in title_selectors:
         title = safe_text(driver, By.XPATH, sel, default="")
-        if title and len(title.strip()) > 15:          # отбрасываем слишком короткие
+        if title and len(title.strip()) > 15:
             break
 
     # 3. Финальная сборка названия
@@ -338,7 +358,6 @@ def extract_name(driver) -> str:
     elif brand:
         full_name = brand.strip()
     else:
-        # последний fallback — берём весь h1
         full_name = safe_text(driver, By.XPATH, "//h1", default="Не найдено")
 
     logger.debug("Извлечено название: %s", full_name[:100])
@@ -430,7 +449,7 @@ def parse_product_page(driver, url: str, product_index: int, total: int) -> dict
         name = extract_name(driver)
         price = extract_price(driver)
 
-        # Теперь открываем панель для описания и характеристик
+        # Открываем панель для описания и характеристик
         open_product_details_panel(driver)
 
         if not is_antibot_page(driver):
@@ -469,11 +488,7 @@ def parse_product_page(driver, url: str, product_index: int, total: int) -> dict
 # ====================== MAIN ======================
 
 def main(url: str = None, output: str = None, num: int = None):
-    """Основная функция программы.
-
-    `num` приходит из run.py. Если main() вызвана напрямую (`python parsers/wildberries.py`)
-    без `num` — используется запасное значение DEFAULT_PRODUCT_COUNT.
-    """
+    """num не передан → берётся DEFAULT_PRODUCT_COUNT из config.toml."""
     target_count = num or DEFAULT_PRODUCT_COUNT
 
     logger.info("=== ЗАПУСК ПАРСЕРА WILDBERRIES ===")
@@ -493,9 +508,9 @@ def main(url: str = None, output: str = None, num: int = None):
         print("Открываем страницу поиска WB...")
         driver.get(url)
         time.sleep(1.5)
-        
-         # Ожидание ручного выбора региона
-        wait_for_user_region_selection()
+
+        if WAIT_FOR_REGION_SELECTION:
+            wait_for_user_region_selection()     # Ожидание ручного выбора региона
 
         WebDriverWait(driver, 6).until(lambda d: len(d.find_elements(By.XPATH, "//a[contains(@class, 'product-card__link')]")) > 0)
 
@@ -554,4 +569,7 @@ def main(url: str = None, output: str = None, num: int = None):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        input("\nНажмите Enter для выхода...")

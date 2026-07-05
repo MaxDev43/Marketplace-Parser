@@ -1,0 +1,39 @@
+[common]
+DEFAULT_PRODUCT_COUNT = 15  # Сколько товаров нужно спарсить
+
+[ozon]
+SWITCH_TO_CHEAPER_OFFER = true  # Переходить на более дешёвое предложение, если обнаружено озоном на карточке товара
+
+# Настройки борьбы с AntiBot
+MAX_ANTIBOT_ATTEMPTS = 3
+ANTIBOT_WAIT_BEFORE_RETRY = 5.0
+ANTIBOT_WAIT_AFTER_REFRESH = 4.0
+ANTIBOT_MARKERS = [
+    "сопоставьте пазл",
+    "двигая ползунок",
+    "captcha",
+    "verify you are human",
+    "подтвердите, что вы не робот",
+    "я не робот",
+    "access denied",
+    "checking your browser",
+]
+
+[wildberries]
+WAIT_FOR_REGION_SELECTION = false   # Останавливаться и ждать ручного выбора региона перед парсингом
+
+# Настройки борьбы с AntiBot
+MAX_ANTIBOT_ATTEMPTS = 3
+ANTIBOT_WAIT_BEFORE_RETRY = 5.0
+ANTIBOT_WAIT_AFTER_REFRESH = 4.0
+ANTIBOT_MARKERS = [
+    "сопоставьте пазл",
+    "двигая ползунок",
+    "captcha",
+    "verify you are human",
+    "подтвердите, что вы не робот",
+    "пройти проверку",
+    "я не робот",
+    "cloudflare",
+    "access denied",
+]

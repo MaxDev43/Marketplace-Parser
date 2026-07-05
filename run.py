@@ -1,11 +1,21 @@
 import argparse
 import inspect
+from pathlib import Path
 from urllib.parse import urlparse
+import sys
+import tomllib
 
 from parsers import ozon, wildberries
 
-# ====================== ГЛОБАЛЬНЫЕ НАСТРОЙКИ ======================
-TARGET_PRODUCT_COUNT = 30   # Сколько товаров нужно спарсить
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent
+
+with open(BASE_DIR / "config.toml", "rb") as f:
+    _config = tomllib.load(f)
+
+DEFAULT_PRODUCT_COUNT = _config["common"]["DEFAULT_PRODUCT_COUNT"]
 
 
 def detect_marketplace(url: str) -> str:
@@ -20,10 +30,7 @@ def detect_marketplace(url: str) -> str:
 
 
 def call_parser(module, url=None, output=None, num=None):
-    """
-    Вызывает main() нужного парсера, передавая только те аргументы,
-    которые он действительно принимает.
-    """
+    """Вызывает main() парсера, передавая только принимаемые им аргументы."""
     main_func = module.main
     sig = inspect.signature(main_func)
     kwargs = {}
@@ -43,18 +50,16 @@ def main():
     parser.add_argument("url", nargs="?", default=None, help="Ссылка на маркетплейс")
     parser.add_argument(
         "-n", "--num", type=int, default=None,
-        help=f"Сколько товаров спарсить (по умолчанию {TARGET_PRODUCT_COUNT})",
+        help=f"Сколько товаров спарсить (по умолчанию {DEFAULT_PRODUCT_COUNT})",
     )
     parser.add_argument("-o", "--output", default=None)
     args = parser.parse_args()
 
-    #  Если URL не передан
     url = args.url
     if not url:
         url = input("🔗 Вставьте ссылку на страницу поиска: ").strip()
 
-    # Если -n/--num не указан явно в команде запуска — берём настройку выше
-    num = args.num if args.num is not None else TARGET_PRODUCT_COUNT
+    num = args.num if args.num is not None else DEFAULT_PRODUCT_COUNT
 
     marketplace = detect_marketplace(url)
 
@@ -71,4 +76,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        input("\nНажмите Enter для выхода...")
