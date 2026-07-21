@@ -1,39 +1,18 @@
 [common]
-DEFAULT_PRODUCT_COUNT = 15  # Сколько товаров нужно спарсить
+DEFAULT_PRODUCT_COUNT = 2  # Сколько товаров нужно спарсить, если не передано -n
 
 [ozon]
-SWITCH_TO_CHEAPER_OFFER = true  # Переходить на более дешёвое предложение, если обнаружено озоном на карточке товара
+API_PREFIX = "entrypoint-api.bx"    # Имя внутреннего API.  Есть аналог - composer-api.bx
+MAX_SEARCH_PAGES = 10
 
-# Настройки борьбы с AntiBot
-MAX_ANTIBOT_ATTEMPTS = 3
-ANTIBOT_WAIT_BEFORE_RETRY = 5.0
-ANTIBOT_WAIT_AFTER_REFRESH = 4.0
-ANTIBOT_MARKERS = [
-    "сопоставьте пазл",
-    "двигая ползунок",
-    "captcha",
-    "verify you are human",
-    "подтвердите, что вы не робот",
-    "я не робот",
-    "access denied",
-    "checking your browser",
-]
+CHALLENGE_WAIT_S = 5.0      # сколько ждать после открытия главной страницы, чтобы JS анти-бота отработал
+NAV_TIMEOUT_S = 50.0        # таймаут навигации Playwright
+REQUEST_DELAY_S = 1.0       # пауза между товарами
+MAX_RETRIES = 2             # повторных попыток при HTTP 403/307 (истёкшая сессия)
+CHECK_CHEAPER_OFFERS = true # Проверять для каждого товара, есть ли тот же товар дешевле (замедляет скорость)
 
 [wildberries]
-WAIT_FOR_REGION_SELECTION = false   # Останавливаться и ждать ручного выбора региона перед парсингом
-
-# Настройки борьбы с AntiBot
-MAX_ANTIBOT_ATTEMPTS = 3
-ANTIBOT_WAIT_BEFORE_RETRY = 5.0
-ANTIBOT_WAIT_AFTER_REFRESH = 4.0
-ANTIBOT_MARKERS = [
-    "сопоставьте пазл",
-    "двигая ползунок",
-    "captcha",
-    "verify you are human",
-    "подтвердите, что вы не робот",
-    "пройти проверку",
-    "я не робот",
-    "cloudflare",
-    "access denied",
-]
+DEST = -1257786             # код региона/пункта назначения для цен и остатков (по умолчанию - Москва)
+REQUEST_DELAY_S = 0.4       # пауза между запросами
+TIMEOUT_S = 15.0            # HTTP-таймаут для requests-запросов к API 
+MAX_RETRIES = 2

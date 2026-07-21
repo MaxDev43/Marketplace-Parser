@@ -17,6 +17,8 @@ with open(BASE_DIR / "config.toml", "rb") as f:
 
 DEFAULT_PRODUCT_COUNT = _config["common"]["DEFAULT_PRODUCT_COUNT"]
 
+MODULES = {"ozon": ozon, "wildberries": wildberries}
+
 
 def detect_marketplace(url: str) -> str:
     netloc = urlparse(url).netloc.lower()
@@ -42,37 +44,35 @@ def call_parser(module, url=None, output=None, num=None):
     if "num" in sig.parameters and num is not None:
         kwargs["num"] = num
 
-    return main_func(**kwargs) if kwargs else main_func(url)
+    return main_func(**kwargs)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Запуск парсера маркетплейса")
-    parser.add_argument("url", nargs="?", default=None, help="Ссылка на маркетплейс")
+    parser.add_argument("url", nargs="?", default=None, help="Ссылка на маркетплейс (поиск или товар)")
     parser.add_argument(
         "-n", "--num", type=int, default=None,
         help=f"Сколько товаров спарсить (по умолчанию {DEFAULT_PRODUCT_COUNT})",
     )
-    parser.add_argument("-o", "--output", default=None)
+    parser.add_argument("-o", "--output", default=None, help="Имя выходного файла в output/")
+    parser.add_argument(
+        "-m", "--marketplace", choices=["ozon", "wildberries"], default=None,
+        help="Явно указать маркетплейс, если авто-определение по домену не подходит",
+    )
     args = parser.parse_args()
 
     url = args.url
     if not url:
-        url = input("🔗 Вставьте ссылку на страницу поиска: ").strip()
+        url = input("🔗 Вставьте ссылку на маркетплейс (поиск или товар): ").strip()
 
-    num = args.num if args.num is not None else DEFAULT_PRODUCT_COUNT
+    marketplace = args.marketplace or detect_marketplace(url)
 
-    marketplace = detect_marketplace(url)
+    if marketplace not in MODULES:
+        raise ValueError(f"Не удалось определить маркетплейс: {url}\n"
+                          f"Укажите явно флагом -m ozon / -m wildberries")
 
-    if marketplace == "ozon":
-        print("Определён маркетплейс: Ozon")
-        call_parser(ozon, url, args.output, num)
-
-    elif marketplace == "wildberries":
-        print("Определён маркетплейс: Wildberries")
-        call_parser(wildberries, url, args.output, num)
-
-    else:
-        raise ValueError(f"Не удалось определить маркетплейс: {url}")
+    print(f"Маркетплейс: {marketplace}")
+    call_parser(MODULES[marketplace], url, args.output, args.num)
 
 
 if __name__ == "__main__":

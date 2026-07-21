@@ -1,3 +1,5 @@
-venv/
-dist/
+.venv/
+output/
+logs/
 __pycache__
+browser/
