@@ -1,5 +1,5 @@
 [common]
-DEFAULT_PRODUCT_COUNT = 2  # Сколько товаров нужно спарсить, если не передано -n
+DEFAULT_PRODUCT_COUNT = 15  # Сколько товаров нужно спарсить, если не передано -n
 
 [ozon]
 API_PREFIX = "entrypoint-api.bx"    # Имя внутреннего API.  Есть аналог - composer-api.bx
